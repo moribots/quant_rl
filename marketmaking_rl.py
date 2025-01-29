@@ -278,7 +278,7 @@ def objective(trial):
 		clip_range=clip_range,
 		verbose=0
 	)
-	model.learn(total_timesteps=100000)
+	model.learn(total_timesteps=50000)
 	
 	# Evaluate model performance
 	eval_df = fetch_evaluation_data(ticker="AAPL", period="8d", interval="1m")
@@ -296,7 +296,7 @@ if __name__ == "__main__":
 	MAX_OFFSET = 1.0
 	LOT_SIZE = 100
 	INVENTORY_PENALTY = 0.001
-	TOTAL_TIMESTEPS = 100000
+	TOTAL_TIMESTEPS = 50000
 	EVAL_EPISODES = 1
 	MODEL_SAVE_FREQ = 10000
 	MODEL_SAVE_PATH = "./models/"
@@ -335,7 +335,7 @@ if __name__ == "__main__":
 		"MlpPolicy",
 		vec_env,
 		verbose=1,
-		learning_rate=0.001,
+		learning_rate=0.005,
 		clip_range=0.3,
 		gae_lambda=0.95,
 		gamma=0.99,
