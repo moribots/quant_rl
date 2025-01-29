@@ -38,7 +38,7 @@ writer = SummaryWriter(TENSORBOARD_LOG_DIR)
 # CSV Logging setup - create file and write header
 with open(CSV_LOG_FILE, "w", newline="") as f:
 	writer_csv = csv.writer(f)
-	writer_csv.writerow(["step", "reward", "policy_loss", "value_loss", "entropy", "inventory", "pnl"])
+	writer_csv.writerow(["step", "reward", "policy_gradient_loss", "value_loss", "entropy", "inventory", "pnl"])
 
 # Custom callback for logging training metrics to both TensorBoard and CSV
 class TrainingLoggingCallback(BaseCallback):
@@ -283,7 +283,7 @@ def objective(trial):
 	# Evaluate model performance
 	eval_df = fetch_evaluation_data(ticker="AAPL", period="8d", interval="1m")
 	eval_env = DummyVecEnv([lambda: StockMarketMakingEnv(df=eval_df, max_offset=1.0, lot_size=100, inventory_penalty_coeff=0.001, start_index=0, end_index=len(eval_df) - 1)])
-	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.)
+	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 	
 	avg_reward, avg_pnl = evaluate_model(model, eval_env, num_episodes=5)
 	return avg_reward
@@ -372,8 +372,9 @@ if __name__ == "__main__":
 
 	# Evaluate on new data
 	eval_df = fetch_historical_stock_data(ticker="AAPL", period="8d", interval="1m")
+	env_df.head()
 	eval_env = DummyVecEnv([lambda: StockMarketMakingEnv(df=eval_df, max_offset=1.0, lot_size=100, inventory_penalty_coeff=0.001, start_index=0, end_index=len(eval_df) - 1)])
-	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.)
+	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
 	print("Evaluating on a different time period...")
 	avg_reward, avg_pnl = evaluate_model(model, eval_env, num_episodes=5)
