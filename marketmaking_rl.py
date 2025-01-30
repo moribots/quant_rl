@@ -452,7 +452,7 @@ if __name__ == "__main__":
 
 	# Evaluate on new data
 	eval_df = fetch_historical_stock_data(ticker="AAPL", period="8d", interval="1m")
-	env_df.head()
+	eval_df.head()
 	eval_env = DummyVecEnv([lambda: StockMarketMakingEnv(df=eval_df, max_offset=1.0, lot_size=100, inventory_penalty_coeff=0.001, start_index=0, end_index=len(eval_df) - 1)])
 	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
