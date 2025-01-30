@@ -259,35 +259,35 @@ class StockMarketMakingEnv(gym.Env):
 
 # Function to Evaluate Market Makers and Collect PnL Over Time
 def evaluate_market_makers(benchmarks, df_data):
-    results = {}
-    benchmark_pnl_series = {}
-    
-    for name, market_maker in benchmarks.items():
-        pnl_series = []
-        pnl, trades = 0, 0
-        
-        for index, row in df_data.iterrows():
-            mid_price = 0.5 * (row["High"] + row["Low"])
-            volatility = df_data["Close"].pct_change().rolling(50).std().iloc[index] if index >= 50 else 0.0
-            
-            if isinstance(market_maker, VolatilityAdaptiveMarketMaker):
-                bid, ask = market_maker.get_quotes(mid_price, volatility)
-            else:
-                bid, ask = market_maker.get_quotes(mid_price)
+	results = {}
+	benchmark_pnl_series = {}
+	
+	for name, market_maker in benchmarks.items():
+		pnl_series = []
+		pnl, trades = 0, 0
+		
+		for index, row in df_data.iterrows():
+			mid_price = 0.5 * (row["High"] + row["Low"])
+			volatility = df_data["Close"].pct_change().rolling(50).std().iloc[index] if index >= 50 else 0.0
+			
+			if isinstance(market_maker, VolatilityAdaptiveMarketMaker):
+				bid, ask = market_maker.get_quotes(mid_price, volatility)
+			else:
+				bid, ask = market_maker.get_quotes(mid_price)
 
-            if row["Low"] <= bid:
-                pnl += mid_price - bid  # Profit from buy
-                trades += 1
-            if row["High"] >= ask:
-                pnl += ask - mid_price  # Profit from sell
-                trades += 1
-            
-            pnl_series.append(pnl)
-        
-        results[name] = {"PnL": pnl, "Trades": trades}
-        benchmark_pnl_series[name] = pnl_series if pnl_series else [0] * len(df_data)
-    
-    return results, benchmark_pnl_series
+			if row["Low"] <= bid:
+				pnl += mid_price - bid  # Profit from buy
+				trades += 1
+			if row["High"] >= ask:
+				pnl += ask - mid_price  # Profit from sell
+				trades += 1
+			
+			pnl_series.append(pnl)
+		
+		results[name] = {"PnL": pnl, "Trades": trades}
+		benchmark_pnl_series[name] = pnl_series if pnl_series else [0] * len(df_data)
+	
+	return results, benchmark_pnl_series
 
 
 def evaluate_model(model, vec_env, num_episodes=1):
@@ -502,6 +502,7 @@ if __name__ == "__main__":
 	market_asks = []
 	market_mid_prices = []
 	market_spreads = []
+	volatility_history = []
 
 	obs = eval_env.reset()
 	done = False
@@ -524,25 +525,29 @@ if __name__ == "__main__":
 		market_asks.append(row["High"])
 		market_mid_prices.append(mid_price)
 		market_spreads.append(row["High"] - row["Low"])
+		volatility_history.append(underlying_env._get_volatility(underlying_env.current_index))
 		iter += 1
 
-	
-
-	plt.figure(figsize=(15, 10))
-	plt.subplot(3, 1, 1)
+	plt.figure(figsize=(15, 12))
+	plt.subplot(4, 1, 1)
 	plt.plot(market_mid_prices, label='Market Mid Price')
 	plt.plot(agent_bids, label='Agent Bid')
 	plt.plot(agent_asks, label='Agent Ask')
 	plt.legend()
 	plt.title('Quotes and Market Prices')
 
-	plt.subplot(3, 1, 2)
+	plt.subplot(4, 1, 2)
 	plt.plot(inventory_history)
 	plt.title('Inventory Over Time')
 
-	plt.subplot(3, 1, 3)
+	plt.subplot(4, 1, 3)
 	plt.plot(pnl_history)
 	plt.title('PnL Over Time')
+
+	plt.subplot(4, 1, 4)
+	plt.plot(volatility_history, color='red', label='Volatility')
+	plt.legend()
+	plt.title('Market Volatility Over Time')
 
 	plt.tight_layout()
 	plt.show()
