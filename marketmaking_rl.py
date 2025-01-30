@@ -331,7 +331,7 @@ def objective(trial):
 		clip_range=clip_range,
 		verbose=0
 	)
-	model.learn(total_timesteps=100)
+	model.learn(total_timesteps=50000)
 	
 	# Evaluate model performance
 	eval_df = fetch_evaluation_data(ticker="AAPL", period="8d", interval="1m")
@@ -370,7 +370,7 @@ class TWAPMarketMaker:
 # Visualization Function for PPO vs Benchmark Strategies
 def plot_ppo_vs_benchmarks(ppo_pnl, benchmark_pnls, labels):
 	plt.figure(figsize=(12, 6))
-	# plt.plot(ppo_pnl, label='PPO Agent', linestyle='-', linewidth=2)
+	plt.plot(ppo_pnl, label='PPO Agent', linestyle='-', linewidth=2)
 	for label in labels:
 		plt.plot(benchmark_pnls[label], label=label, linestyle='--', linewidth=2)
 	
@@ -389,7 +389,7 @@ if __name__ == "__main__":
 	MAX_OFFSET = 1.0
 	LOT_SIZE = 100
 	INVENTORY_PENALTY = 0.001
-	TOTAL_TIMESTEPS = 100
+	TOTAL_TIMESTEPS = 50000
 	EVAL_EPISODES = 1
 	MODEL_SAVE_FREQ = 10000
 	MODEL_SAVE_PATH = "./models/"
