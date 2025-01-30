@@ -38,7 +38,7 @@ writer = SummaryWriter(TENSORBOARD_LOG_DIR)
 # CSV Logging setup - create file and write header
 with open(CSV_LOG_FILE, "w", newline="") as f:
 	writer_csv = csv.writer(f)
-	writer_csv.writerow(["step", "reward", "policy_gradient_loss", "value_loss", "entropy", "std", "inventory", "pnl"])
+	writer_csv.writerow(["step", "reward", "policy_gradient_loss", "value_loss", "entropy", "std", "inventory", "pnl", "spread_penalty"])
 
 # Custom callback for logging training metrics to both TensorBoard and CSV
 class TrainingLoggingCallback(BaseCallback):
@@ -59,6 +59,7 @@ class TrainingLoggingCallback(BaseCallback):
 		info = self.locals["infos"][-1]  # Latest episode info
 		inventory = info.get("inventory", -1)
 		pnl = info.get("pnl", -1)
+		spread_penalty = info.get("spread_penalty", -1)
 		
 		# Log metrics to TensorBoard
 		writer.add_scalar("Training/Reward", np.mean(rewards), self.step)
@@ -68,11 +69,12 @@ class TrainingLoggingCallback(BaseCallback):
 		writer.add_scalar("Training/Std", std, self.step)
 		writer.add_scalar("Training/Inventory", inventory, self.step)
 		writer.add_scalar("Training/PnL", pnl, self.step)
+		writer.add_scalar("Training/SpreadPenalty", spread_penalty, self.step)
 		
 		# Append metrics to CSV file
 		with open(CSV_LOG_FILE, "a", newline="") as f:
 			writer_csv = csv.writer(f)
-			writer_csv.writerow([self.step, np.mean(rewards), policy_loss, value_loss, entropy, std, inventory, pnl])
+			writer_csv.writerow([self.step, np.mean(rewards), policy_loss, value_loss, entropy, std, inventory, pnl, spread_penalty])
 		
 		self.step += 1  # Increment step counter
 		return True  # Continue training
@@ -116,6 +118,7 @@ class StockMarketMakingEnv(gym.Env):
 		self.inventory = 0.0  # Current asset holdings
 		self.cash = 0.0  # Available funds
 		self.prev_pnl = 0.0  # Previous profit/loss
+		self.spread_penalty = 0.0
 
 		# Define action space: [bid_offset, ask_offset] from mid price
 		self.action_space = spaces.Box(
@@ -137,6 +140,7 @@ class StockMarketMakingEnv(gym.Env):
 		self.current_step = 0
 		self.current_index = self.start_index
 		self.inventory = 0.0
+		self.spread_penalty = 0.0
 		self.cash = 0.0
 		self.prev_pnl = 0.0
 		return self._get_observation()
@@ -161,8 +165,8 @@ class StockMarketMakingEnv(gym.Env):
 
 		# Compute a penalty based on spread and volatility.
 		# Naive idea: tight spread on low volatility, wide spread on high volatility.
-		spread_penalty = abs(ask_offset - bid_offset) - (volatility * 2)
-		spread_penalty = max(spread_penalty, 0) * -0.1
+		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * 2)
+		self.spread_penalty = max(self.spread_penalty, 0) * -0.1
 
 		# Simulate order execution
 		fill_bid_amount, fill_ask_amount, fill_bid_price, fill_ask_price = self._simulate_fills(
@@ -194,7 +198,7 @@ class StockMarketMakingEnv(gym.Env):
 		done = self.current_index >= self.end_index  # Episode completion check
 
 		obs = self._get_observation()
-		info = {"pnl": current_pnl, "inventory": self.inventory}
+		info = {"pnl": current_pnl, "inventory": self.inventory, "spread_penalty": self.spread_penalty}
 
 		return obs, reward, done, info
 
