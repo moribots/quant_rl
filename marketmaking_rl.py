@@ -84,12 +84,14 @@ class StockMarketMakingEnv(gym.Env):
 		lot_size: float = 100,
 		inventory_penalty_coeff: float = 0.001,
 		start_index: int = 0,
-		end_index: int = None
+		end_index: int = None,
+		volatility_window: int = 50
 	):
 		super(StockMarketMakingEnv, self).__init__()
 
 		# Initialize market data
 		self.df = df.reset_index(drop=True)
+		self.volatility_window = volatility_window
 
 		# Set episode boundaries
 		if end_index is None:
@@ -137,16 +139,28 @@ class StockMarketMakingEnv(gym.Env):
 		self.prev_pnl = 0.0
 		return self._get_observation()
 
+	def get_volatility(self):
+		if self.current_index < self.volatility_window:
+			return 0.0
+		returns = self.df["Close"].pct_change().iloc[self.current_index - self.volatility_window:self.current_index]
+		return returns.std()
+
 	def step(self, action):
 		"""Execute one timestep of the environment"""
 		row = self.df.iloc[self.current_index]
 		mid_price = 0.5 * (row["High"] + row["Low"])
 		spread = row["High"] - row["Low"]
+		volatility = self.get_volatility()
 
 		# Decode action into bid/ask prices
 		bid_offset, ask_offset = action
 		agent_bid = max(mid_price + bid_offset, 0.01)  # Ensure positive prices
 		agent_ask = max(mid_price + ask_offset, agent_bid + 0.01)  # Ensure ask > bid
+
+		# Compute a penalty based on spread and volatility.
+		# Naive idea: tight spread on low volatility, wide spread on high volatility.
+		spread_penalty = abs(ask_offset - bid_offset) - (volatility * 2)
+		spread_penalty = max(spread_penalty, 0) * -0.1
 
 		# Simulate order execution
 		fill_bid_amount, fill_ask_amount, fill_bid_price, fill_ask_price = self._simulate_fills(
@@ -165,9 +179,10 @@ class StockMarketMakingEnv(gym.Env):
 
 		# Calculate reward components
 		incremental_pnl = current_pnl - self.prev_pnl
-		normalized_pnl = incremental_pnl
 		inventory_penalty = self.inventory_penalty_coeff * (self.inventory ** 2)
-		reward = np.clip(normalized_pnl - inventory_penalty, -10, 10)
+		raw_reward = np.clip(incremental_pnl - inventory_penalty + spread_penalty, -10, 10)
+		# Normalize
+		reward = np.tanh(raw_reward / 100.0) * 100.0
 
 		self.prev_pnl = current_pnl  # Store for next step
 
@@ -236,6 +251,31 @@ class StockMarketMakingEnv(gym.Env):
 			f"Inventory: {self.inventory:.2f}, PnL: {current_pnl:.2f}"
 		)
 
+def evaluate_market_makers(agent, benchmarks, df_data):
+	results = {}
+
+	for name, market_maker in benchmarks.items():
+		pnl, trades = 0, 0
+		for _, row in df_data.iterrows():
+			mid_price = 0.5 * (row["High"] + row["Low"])
+			if isinstance(market_maker, VolatilityAdaptiveMarketMaker):
+				volatility = df_data["Close"].pct_change().rolling(50).std().iloc[-1]
+				bid, ask = market_maker.get_quotes(mid_price, volatility)
+			else:
+				bid, ask = market_maker.get_quotes(mid_price)
+
+			if row["Low"] <= bid:
+				pnl += mid_price - bid  # Profit from buy
+				trades += 1
+			if row["High"] >= ask:
+				pnl += ask - mid_price  # Profit from sell
+				trades += 1
+
+		results[name] = {"PnL": pnl, "Trades": trades}
+
+	return results
+
+
 def evaluate_model(model, vec_env, num_episodes=1):
 	"""Evaluate trained model performance"""
 	rewards = []
@@ -253,7 +293,7 @@ def evaluate_model(model, vec_env, num_episodes=1):
 			pnls.append(infos[0].get("pnl", 0.0))
 		else:
 			pnls.append(0.0)
-	return np.mean(rewards), np.mean(pnls)
+	return np.mean(rewards), np.mean(pnls), pnls
 
 def fetch_historical_stock_data(ticker: str, period: str = "4d", interval: str = "1m"):
 	"""Download historical stock data using Yahoo Finance"""
@@ -278,15 +318,55 @@ def objective(trial):
 		clip_range=clip_range,
 		verbose=0
 	)
-	model.learn(total_timesteps=50000)
+	model.learn(total_timesteps=100)
 	
 	# Evaluate model performance
 	eval_df = fetch_evaluation_data(ticker="AAPL", period="8d", interval="1m")
 	eval_env = DummyVecEnv([lambda: StockMarketMakingEnv(df=eval_df, max_offset=1.0, lot_size=100, inventory_penalty_coeff=0.001, start_index=0, end_index=len(eval_df) - 1)])
 	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 	
-	avg_reward, avg_pnl = evaluate_model(model, eval_env, num_episodes=5)
+	avg_reward, _1, _2 = evaluate_model(model, eval_env, num_episodes=5)
 	return avg_reward
+
+class FixedSpreadMarketMaker:
+	def __init__(self, spread=0.10):
+		self.spread = spread
+
+	def get_quotes(self, mid_price):
+		return mid_price - self.spread / 2, mid_price + self.spread / 2  # (bid, ask)
+
+
+class VolatilityAdaptiveMarketMaker:
+	def __init__(self, base_spread=0.05, volatility_multiplier=1.5):
+		self.base_spread = base_spread
+		self.volatility_multiplier = volatility_multiplier
+
+	def get_quotes(self, mid_price, volatility):
+		spread = self.base_spread * (1 + self.volatility_multiplier * volatility)
+		return mid_price - spread / 2, mid_price + spread / 2  # (bid, ask)
+
+
+class TWAPMarketMaker:
+	def __init__(self, base_spread=0.05):
+		self.base_spread = base_spread
+
+	def get_quotes(self, mid_price):
+		spread = self.base_spread * random.uniform(0.5, 1.5)
+		return mid_price - spread / 2, mid_price + spread / 2  # (bid, ask)
+
+# Visualization Function for PPO vs Benchmark Strategies
+def plot_ppo_vs_benchmarks(ppo_pnl, benchmark_pnls, labels):
+	plt.figure(figsize=(12, 6))
+	plt.plot(ppo_pnl, label='PPO Agent', linestyle='-', linewidth=2)
+	for pnl, label in zip(benchmark_pnls, labels):
+		plt.plot(pnl, label=label, linestyle='--', alpha=0.7)
+	
+	plt.xlabel("Time Steps")
+	plt.ylabel("Cumulative PnL")
+	plt.title("PPO Market Maker vs Benchmark Strategies")
+	plt.legend()
+	plt.show()
+
 
 if __name__ == "__main__":
 	# Configuration parameters
@@ -296,7 +376,7 @@ if __name__ == "__main__":
 	MAX_OFFSET = 1.0
 	LOT_SIZE = 100
 	INVENTORY_PENALTY = 0.001
-	TOTAL_TIMESTEPS = 50000
+	TOTAL_TIMESTEPS = 100
 	EVAL_EPISODES = 1
 	MODEL_SAVE_FREQ = 10000
 	MODEL_SAVE_PATH = "./models/"
@@ -377,8 +457,18 @@ if __name__ == "__main__":
 	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
 	print("Evaluating on a different time period...")
-	avg_reward, avg_pnl = evaluate_model(model, eval_env, num_episodes=5)
+	avg_reward, avg_pnl, ppo_pnls = evaluate_model(model, eval_env, num_episodes=5)
 	print(f"Evaluation Results - Avg Reward: {avg_reward:.2f}, Avg PnL: {avg_pnl:.2f}")
+	# Benchmark Comparison
+	benchmarks = {
+	"Fixed Spread MM": FixedSpreadMarketMaker(spread=0.10),
+	"Volatility Adaptive MM": VolatilityAdaptiveMarketMaker(base_spread=0.05, volatility_multiplier=1.5),
+	"TWAP MM": TWAPMarketMaker(base_spread=0.05)
+	}
+
+	benchmark_pnls = evaluate_market_makers(benchmarks, eval_df)
+	labels = ["Fixed Spread MM", "Volatility Adaptive MM", "TWAP MM"]
+	plot_ppo_vs_benchmarks(ppo_pnls, benchmark_pnls, labels)
 
 	# Visualization of agent performance
 	print("\nRunning a single episode with visualization:")
@@ -413,6 +503,8 @@ if __name__ == "__main__":
 		market_asks.append(row["High"])
 		market_mid_prices.append(mid_price)
 		market_spreads.append(row["High"] - row["Low"])
+
+	
 
 	plt.figure(figsize=(15, 10))
 	plt.subplot(3, 1, 1)
