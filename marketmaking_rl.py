@@ -182,7 +182,7 @@ class StockMarketMakingEnv(gym.Env):
 		inventory_penalty = self.inventory_penalty_coeff * (self.inventory ** 2)
 		raw_reward = np.clip(incremental_pnl - inventory_penalty + spread_penalty, -10, 10)
 		# Normalize
-		reward = np.tanh(raw_reward / 100.0) * 100.0
+		reward = np.tanh(raw_reward / 10.0) * 10.0
 
 		self.prev_pnl = current_pnl  # Store for next step
 
@@ -482,8 +482,6 @@ if __name__ == "__main__":
 	results, benchmark_pnls = evaluate_market_makers(benchmarks, eval_df)
 	
 	labels = ["Fixed Spread MM", "Volatility Adaptive MM", "TWAP MM"]
-	print(labels[2])
-	print(benchmark_pnls[labels[2]][0:10])
 	plot_ppo_vs_benchmarks(ppo_pnls, benchmark_pnls, labels)
 
 	# Visualization of agent performance
