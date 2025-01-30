@@ -50,16 +50,16 @@ class TrainingLoggingCallback(BaseCallback):
 		# Extract training metrics from logger
 		rewards = self.locals["rewards"]
 		loss = self.model.logger.name_to_value
-		policy_loss = loss.get("train/policy_gradient_loss", -1)
-		value_loss = loss.get("train/value_loss", -1)
-		entropy = loss.get("train/entropy_loss", -1)
-		std = loss.get("train/std", -1)
+		policy_loss = loss.get("train/policy_gradient_loss", 0)
+		value_loss = loss.get("train/value_loss", 0)
+		entropy = loss.get("train/entropy_loss", 0)
+		std = loss.get("train/std", 0)
 		
 		# Get environment information
 		info = self.locals["infos"][-1]  # Latest episode info
-		inventory = info.get("inventory", -1)
-		pnl = info.get("pnl", -1)
-		spread_penalty = info.get("spread_penalty", -1)
+		inventory = info.get("inventory", 0)
+		pnl = info.get("pnl", 0)
+		spread_penalty = info.get("spread_penalty", 0)
 		
 		# Log metrics to TensorBoard
 		writer.add_scalar("Training/Reward", np.mean(rewards), self.step)
