@@ -38,7 +38,7 @@ writer = SummaryWriter(TENSORBOARD_LOG_DIR)
 # CSV Logging setup - create file and write header
 with open(CSV_LOG_FILE, "w", newline="") as f:
 	writer_csv = csv.writer(f)
-	writer_csv.writerow(["step", "reward", "policy_gradient_loss", "value_loss", "entropy", "inventory", "pnl"])
+	writer_csv.writerow(["step", "reward", "policy_gradient_loss", "value_loss", "entropy", "std", "inventory", "pnl"])
 
 # Custom callback for logging training metrics to both TensorBoard and CSV
 class TrainingLoggingCallback(BaseCallback):
@@ -53,6 +53,7 @@ class TrainingLoggingCallback(BaseCallback):
 		policy_loss = loss.get("train/policy_gradient_loss", -1)
 		value_loss = loss.get("train/value_loss", -1)
 		entropy = loss.get("train/entropy_loss", -1)
+		std = loss.get("train/std", -1)
 		
 		# Get environment information
 		info = self.locals["infos"][-1]  # Latest episode info
@@ -64,13 +65,14 @@ class TrainingLoggingCallback(BaseCallback):
 		writer.add_scalar("Training/Policy Loss", policy_loss, self.step)
 		writer.add_scalar("Training/Value Loss", value_loss, self.step)
 		writer.add_scalar("Training/Entropy", entropy, self.step)
+		writer.add_scalar("Training/Std", std, self.step)
 		writer.add_scalar("Training/Inventory", inventory, self.step)
 		writer.add_scalar("Training/PnL", pnl, self.step)
 		
 		# Append metrics to CSV file
 		with open(CSV_LOG_FILE, "a", newline="") as f:
 			writer_csv = csv.writer(f)
-			writer_csv.writerow([self.step, np.mean(rewards), policy_loss, value_loss, entropy, inventory, pnl])
+			writer_csv.writerow([self.step, np.mean(rewards), policy_loss, value_loss, entropy, std, inventory, pnl])
 		
 		self.step += 1  # Increment step counter
 		return True  # Continue training
@@ -428,7 +430,7 @@ if __name__ == "__main__":
 		"MlpPolicy",
 		vec_env,
 		verbose=1,
-		learning_rate=0.005,
+		learning_rate=0.002,
 		clip_range=0.3,
 		gae_lambda=0.95,
 		gamma=0.99,
