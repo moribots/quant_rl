@@ -139,7 +139,7 @@ class StockMarketMakingEnv(gym.Env):
 		df: pd.DataFrame,
 		max_offset: float = 1.0,
 		lot_size: float = 100,
-		inventory_penalty_coeff: float = 0.001,
+		inventory_penalty_coeff: float = 0.0,
 		start_index: int = 0,
 		end_index: int = None,
 		volatility_window: int = 50
@@ -238,10 +238,11 @@ class StockMarketMakingEnv(gym.Env):
 
 		# Compute a penalty based on how tight the spread is relative to volatility.
 		volatility_factor = 2.0
+		spread_penalty_factor = 10.0
 		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * volatility_factor)
 		self.spread_penalty = max(self.spread_penalty, 0)
 
-		off_book_market_penalty_factor = 1.0
+		off_book_market_penalty_factor = 10.0
 		market_ask = row["High"]
 		market_bid = row["Low"]
 		off_book_market_penalty = 0.0
@@ -811,7 +812,7 @@ if __name__ == "__main__":
 		"DATA_INTERVAL": "1m",            # Time interval between data points.
 		"MAX_OFFSET": 1.0,                # Maximum quote offset.
 		"LOT_SIZE": 100,                  # Trade lot size.
-		"INVENTORY_PENALTY": 0.001,         # Penalty coefficient for inventory.
+		"INVENTORY_PENALTY": 1e-7,         # Penalty coefficient for inventory.
 		"TOTAL_TIMESTEPS": 50000,         # Total training steps for PPO.
 		"EVAL_EPISODES": 1,               # Number of evaluation episodes.
 		"MODEL_SAVE_FREQ": 10000,         # Frequency (in timesteps) to save the model.
