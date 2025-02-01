@@ -143,7 +143,7 @@ class StockMarketMakingEnv(gym.Env):
 		start_index: int = 0,
 		end_index: int = None,
 		volatility_window: int = 50,
-		rollover: bool = False  # New parameter: if True, maintain state across episodes
+		rollover: bool = True  # New parameter: if True, maintain state across episodes
 	):
 		"""
 		Initialize the environment with market data and trading parameters.
