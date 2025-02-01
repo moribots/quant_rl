@@ -33,10 +33,6 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize  # For ve
 # Utility Function: Set a random seed for reproducibility.
 # -----------------------------------------------------------------------------
 def set_seed(seed: int = 0):
-	"""
-	Set random seeds for Python, NumPy, and PyTorch.
-	This ensures that the results are reproducible.
-	"""
 	random.seed(seed)
 	np.random.seed(seed)
 	torch.manual_seed(seed)
@@ -45,7 +41,7 @@ def set_seed(seed: int = 0):
 
 
 # -----------------------------------------------------------------------------
-# LoggerManager: Manages logging using TensorBoard and CSV.
+# LoggerManager: Process logged data with TensorBoard and CSV.
 # -----------------------------------------------------------------------------
 class LoggerManager:
 	def __init__(self, log_dir="logs"):
@@ -74,7 +70,7 @@ class LoggerManager:
 
 
 # -----------------------------------------------------------------------------
-# TrainingLoggingCallback: A custom callback to log training metrics.
+# TrainingLoggingCallback: A custom callback to log training data.
 # -----------------------------------------------------------------------------
 class TrainingLoggingCallback(BaseCallback):
 	def __init__(self, logger_manager: LoggerManager, verbose=0):
@@ -105,6 +101,9 @@ class TrainingLoggingCallback(BaseCallback):
 		inventory = info.get("inventory", 0)
 		pnl = info.get("pnl", 0)
 		spread_penalty = info.get("spread_penalty", 0)
+		incremental_pnl = info.get("incremental_pnl", 0)
+		inventory_penalty = info.get("inventory_penalty", 0)
+		off_book_market_penalty = info.get("off_book_market_penalty", 0)
 
 		# Log metrics to TensorBoard for visualization.
 		self.logger_manager.writer.add_scalar("Training/Reward", np.mean(rewards), self.step)
@@ -115,8 +114,11 @@ class TrainingLoggingCallback(BaseCallback):
 		self.logger_manager.writer.add_scalar("Training/Inventory", inventory, self.step)
 		self.logger_manager.writer.add_scalar("Training/PnL", pnl, self.step)
 		self.logger_manager.writer.add_scalar("Training/SpreadPenalty", spread_penalty, self.step)
+		self.logger_manager.writer.add_scalar("Training/PnLReward", incremental_pnl, self.step)
+		self.logger_manager.writer.add_scalar("Training/InventoryPenalty", inventory_penalty, self.step)
+		self.logger_manager.writer.add_scalar("Training/OffBookPenalty", off_book_market_penalty, self.step)
 
-		# Append the same metrics to a CSV file for record keeping.
+		# Append the same metrics to a CSV file for offline processing.
 		with open(self.logger_manager.csv_log_file, "a", newline="") as f:
 			writer_csv = csv.writer(f)
 			writer_csv.writerow([
@@ -225,19 +227,29 @@ class StockMarketMakingEnv(gym.Env):
 		# Get the current market data row.
 		row = self.df.iloc[self.current_index]
 		mid_price = 0.5 * (row["High"] + row["Low"])
-		spread = row["High"] - row["Low"]
 		volatility = self.get_volatility()
 
 		# Decode the agent's action into bid and ask offsets.
 		bid_offset, ask_offset = action
 		# Ensure that the bid price is always positive.
-		agent_bid = max(mid_price + bid_offset, 0.01)
+		agent_bid = max(mid_price + bid_offset, 1e-3)
 		# Ensure that the ask price is always greater than the bid.
-		agent_ask = max(mid_price + ask_offset, agent_bid + 0.01)
+		agent_ask = max(mid_price + ask_offset, agent_bid + 1e-3)
 
 		# Compute a penalty based on how tight the spread is relative to volatility.
-		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * 2)
-		self.spread_penalty = max(self.spread_penalty, 0) * -0.1
+		volatility_factor = 2.0
+		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * volatility_factor)
+		self.spread_penalty = max(self.spread_penalty, 0)
+
+		off_book_market_penalty_factor = 1.0
+		market_ask = row["High"]
+		market_bid = row["Low"]
+		off_book_market_penalty = 0.0
+		if agent_ask < market_ask:
+			reward += off_book_market_penalty_factor * (market_ask - agent_ask)
+		if agent_bid > market_bid:
+			reward += off_book_market_penalty_factor * (agent_bid - market_bid)
+
 
 		# Simulate order execution using market data.
 		fill_bid_amount, fill_ask_amount, fill_bid_price, fill_ask_price = self._simulate_fills(agent_bid, agent_ask, row)
@@ -255,8 +267,9 @@ class StockMarketMakingEnv(gym.Env):
 		# Compute the reward from this step.
 		# Reward is based on the incremental PnL minus an inventory penalty and the spread penalty.
 		incremental_pnl = current_pnl - self.prev_pnl
+		# The inventory penalty avoids risk by penalizing inventory accumulation quadratically, hence guiding the agent to reduce exposure.
 		inventory_penalty = self.inventory_penalty_coeff * (self.inventory ** 2)
-		raw_reward = incremental_pnl - inventory_penalty + self.spread_penalty
+		raw_reward = incremental_pnl - inventory_penalty - self.spread_penalty - off_book_market_penalty
 		reward = np.tanh(raw_reward / 10.0) * 10.0  # Normalize reward using tanh.
 
 		# Update the previous PnL for the next step.
@@ -269,7 +282,8 @@ class StockMarketMakingEnv(gym.Env):
 
 		# Construct the new observation and additional info.
 		obs = self._get_observation()
-		info = {"pnl": current_pnl, "inventory": self.inventory, "spread_penalty": self.spread_penalty}
+		info = {"pnl": current_pnl, "inventory": self.inventory, "spread_penalty": self.spread_penalty,
+		"inventory_penalty": inventory_penalty, "off_book_market_penalty": off_book_market_penalty, "incremental_pnl": incremental_pnl}
 		return obs, reward, done, info
 
 	def _simulate_fills(self, agent_bid, agent_ask, row):
@@ -451,13 +465,10 @@ class ModelEvaluator:
 			episode_reward = 0.0
 			iter_count = 0
 			while not done:
-				if iter_count > 10000:
-					break
 				# Predict the next action using the trained model.
 				action, _ = self.model.predict(obs, deterministic=True)
 				obs, reward, done, infos = self.vec_env.step(action)
 				episode_reward += reward
-				iter_count += 1
 			rewards.append(episode_reward)
 			if isinstance(infos, list) and len(infos) > 0:
 				pnls.append(infos[0].get("pnl", 0.0))
@@ -631,20 +642,58 @@ class MarketMakerRunner:
 		# Define model parameters for PPO.
 		model_params = {
 			"verbose": 1,
+
+			# Learning rate which determines gradient step size.
 			"learning_rate": 0.002,
+
+			# Clip range for PPO's policy update. This clips the ratio between the new
+			# and old policy probabilities to lie within [1 - clip_range, 1 + clip_range].
 			"clip_range": 0.3,
+
+			# Lambda used in Generalized Advantage Estimation (GAE). A value of 0.95
+			# helps smooth the advantage estimates by weighting longer-term rewards.
 			"gae_lambda": 0.95,
+
+			# Discount factor for future rewards. A value of 0.99 means that the agent
+			# considers future rewards nearly as important as immediate ones, which
+			# makes sense in financial applications where long-term planning is essential.
 			"gamma": 0.99,
+
+			# Number of steps to collect per update (rollout length).
 			"n_steps": 2048,
+
+			# Mini-batch size used for training from the collected experience.
+			# A size of 64 is a common trade-off that balances the noise in the gradient estimates
+			# with computational efficiency.
 			"batch_size": 64,
-			"ent_coef": 0.1,
+
+			# Entropy coefficient. This term in the loss function encourages exploration by
+			# adding randomness to the policy.
+			"ent_coef": 0.2,
+
+			# Value function coefficient. This scales the loss term associated with the critic (value network).
 			"vf_coef": 0.25,
+
+			# Maximum gradient norm for clipping. Clipping gradients to a norm of 0.3 helps prevent
+			# exploding gradients and stabilizes training.
 			"max_grad_norm": 0.3,
+
+			# Policy network architecture and activation function.
 			"policy_kwargs": dict(
-				net_arch=dict(pi=[256, 256, 256], vf=[256, 256, 256]),
+				# Define separate network architectures for the policy (pi) and the value function (vf).
+				# Both networks here consist of three hidden layers, each with 256 neurons,
+				# which is a common architecture that can capture complex patterns in the data.
+				net_arch=dict(
+					pi=[256, 256, 256],  # Architecture for the policy network.
+					vf=[256, 256, 256]   # Architecture for the value network.
+				),
+				# Activation function for the networks. LeakyReLU is chosen over ReLU because it
+				# allows a small, non-zero gradient when the unit is not active (for negative inputs),
+				# reducing the risk of "dead neurons" that never update.
 				activation_fn=torch.nn.LeakyReLU,
 			)
 		}
+
 
 		# Prepare callbacks for saving the model and logging training metrics.
 		model_save_path = self.config["MODEL_SAVE_PATH"]
@@ -722,10 +771,9 @@ class MarketMakerRunner:
 
 		obs = eval_env.reset()
 		done = False
-		iter_count = 0
 
 		# Run the episode until it's done or a maximum number of iterations.
-		while not done and iter_count < 10000:
+		while not done:
 			action, _ = trainer.get_model().predict(obs, deterministic=True)
 			obs, reward, done, infos = eval_env.step(action)
 			# Record performance metrics from the environment.
@@ -739,7 +787,6 @@ class MarketMakerRunner:
 			agent_asks.append(mid_price + action[0][1])
 			market_mid_prices.append(mid_price)
 			volatility_history.append(underlying_env.get_volatility())
-			iter_count += 1
 
 		# Prepare data for plotting.
 		perf_data = {
