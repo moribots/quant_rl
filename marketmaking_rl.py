@@ -271,7 +271,7 @@ class StockMarketMakingEnv(gym.Env):
 		# The inventory penalty avoids risk by penalizing inventory accumulation quadratically, hence guiding the agent to reduce exposure.
 		inventory_penalty = self.inventory_penalty_coeff * (self.inventory ** 2)
 		raw_reward = incremental_pnl - inventory_penalty - self.spread_penalty - off_book_market_penalty
-		reward = np.tanh(raw_reward / 10.0) * 10.0  # Normalize reward using tanh.
+		reward = np.tanh(raw_reward / 1000) * 10.0  # Normalize reward using tanh.
 
 		# Update the previous PnL for the next step.
 		self.prev_pnl = current_pnl
