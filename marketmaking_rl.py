@@ -670,7 +670,7 @@ class MarketMakerRunner:
 
 			# Entropy coefficient. This term in the loss function encourages exploration by
 			# adding randomness to the policy.
-			"ent_coef": 0.1,
+			"ent_coef": 0.01,
 
 			# Value function coefficient. This scales the loss term associated with the critic (value network).
 			"vf_coef": 0.25,
