@@ -1,28 +1,37 @@
-# Import required libraries
-import os  # Operating system interfaces
-import yfinance as yf  # Financial data download
-import gym  # Reinforcement learning environments
-import numpy as np  # Numerical computing
-import pandas as pd  # Data manipulation
-import matplotlib.pyplot as plt  # Data visualization
-from gym import spaces  # RL action/observation space definitions
-from stable_baselines3 import PPO  # Proximal Policy Optimization algorithm
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize  # Vectorized environments
-import torch  # Deep learning framework
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback  # Training utilities
-import random  # Random number generation
-import csv  # CSV file handling
-from torch.utils.tensorboard import SummaryWriter  # Training visualization
+#!/usr/bin/env python
+"""
+An encapsulated version of a market‐making RL agent.
+Each class is responsible for one “piece” of the process:
+– MarketDataFetcher: downloads historical data.
+– StockMarketMakingEnv: a custom gym environment.
+– LoggerManager & TrainingLoggingCallback: log training statistics.
+– PPOTrainer: set up and train the PPO agent.
+– ModelEvaluator: run evaluation episodes.
+– BenchmarkEvaluator: run benchmark market‐making strategies.
+– Visualizer: plot evaluation and agent performance results.
+– MarketMakerRunner: orchestrates the entire pipeline.
+"""
 
-# Set up logging directories
-LOG_DIR = "logs"
-CSV_LOG_FILE = os.path.join(LOG_DIR, "training_logs.csv")
-TENSORBOARD_LOG_DIR = os.path.join(LOG_DIR, "tensorboard")
-# Create directories if they don't exist
-os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(TENSORBOARD_LOG_DIR, exist_ok=True)
+import os
+import random
+import csv
 
-# Set random seed for reproducibility across multiple libraries
+import gym
+from gym import spaces
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import yfinance as yf
+import torch
+
+from torch.utils.tensorboard import SummaryWriter
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+# -----------------------------------------------------------------------------
+# Utility: Seed function for reproducibility
+# -----------------------------------------------------------------------------
 def set_seed(seed: int = 0):
 	random.seed(seed)
 	np.random.seed(seed)
@@ -30,56 +39,77 @@ def set_seed(seed: int = 0):
 	if torch.cuda.is_available():
 		torch.cuda.manual_seed(seed)
 
-set_seed(0)  # Initialize all random seeds
 
-# TensorBoard Writer for logging training metrics
-writer = SummaryWriter(TENSORBOARD_LOG_DIR)
+# -----------------------------------------------------------------------------
+# LoggerManager: Set up logging directories, TensorBoard and CSV logging.
+# -----------------------------------------------------------------------------
+class LoggerManager:
+	def __init__(self, log_dir="logs"):
+		self.log_dir = log_dir
+		self.tensorboard_log_dir = os.path.join(self.log_dir, "tensorboard")
+		self.csv_log_file = os.path.join(self.log_dir, "training_logs.csv")
+		os.makedirs(self.log_dir, exist_ok=True)
+		os.makedirs(self.tensorboard_log_dir, exist_ok=True)
+		self.writer = SummaryWriter(self.tensorboard_log_dir)
+		# Initialize CSV file with header.
+		with open(self.csv_log_file, "w", newline="") as f:
+			writer_csv = csv.writer(f)
+			writer_csv.writerow([
+				"step", "reward", "policy_gradient_loss", "value_loss",
+				"entropy", "std", "inventory", "pnl", "spread_penalty"
+			])
 
-# CSV Logging setup - create file and write header
-with open(CSV_LOG_FILE, "w", newline="") as f:
-	writer_csv = csv.writer(f)
-	writer_csv.writerow(["step", "reward", "policy_gradient_loss", "value_loss", "entropy", "std", "inventory", "pnl", "spread_penalty"])
 
-# Custom callback for logging training metrics to both TensorBoard and CSV
+# -----------------------------------------------------------------------------
+# TrainingLoggingCallback: Custom callback that logs training metrics.
+# -----------------------------------------------------------------------------
 class TrainingLoggingCallback(BaseCallback):
-	def __init__(self, verbose=0):
+	def __init__(self, logger_manager: LoggerManager, verbose=0):
 		super(TrainingLoggingCallback, self).__init__(verbose)
-		self.step = 0  # Initialize step counter
+		self.logger_manager = logger_manager
+		self.step = 0  # Step counter
 
 	def _on_step(self) -> bool:
 		# Extract training metrics from logger
-		rewards = self.locals["rewards"]
+		rewards = self.locals.get("rewards", [])
 		loss = self.model.logger.name_to_value
 		policy_loss = loss.get("train/policy_gradient_loss", 0)
 		value_loss = loss.get("train/value_loss", 0)
 		entropy = loss.get("train/entropy_loss", 0)
 		std = loss.get("train/std", 0)
-		
-		# Get environment information
-		info = self.locals["infos"][-1]  # Latest episode info
+
+		# Get environment info from the last element in infos
+		infos = self.locals.get("infos", [])
+		info = infos[-1] if infos else {}
 		inventory = info.get("inventory", 0)
 		pnl = info.get("pnl", 0)
 		spread_penalty = info.get("spread_penalty", 0)
-		
-		# Log metrics to TensorBoard
-		writer.add_scalar("Training/Reward", np.mean(rewards), self.step)
-		writer.add_scalar("Training/Policy Loss", policy_loss, self.step)
-		writer.add_scalar("Training/Value Loss", value_loss, self.step)
-		writer.add_scalar("Training/Entropy", entropy, self.step)
-		writer.add_scalar("Training/Std", std, self.step)
-		writer.add_scalar("Training/Inventory", inventory, self.step)
-		writer.add_scalar("Training/PnL", pnl, self.step)
-		writer.add_scalar("Training/SpreadPenalty", spread_penalty, self.step)
-		
-		# Append metrics to CSV file
-		with open(CSV_LOG_FILE, "a", newline="") as f:
-			writer_csv = csv.writer(f)
-			writer_csv.writerow([self.step, np.mean(rewards), policy_loss, value_loss, entropy, std, inventory, pnl, spread_penalty])
-		
-		self.step += 1  # Increment step counter
-		return True  # Continue training
 
-# Custom Gym environment for stock market making
+		# Log metrics to TensorBoard
+		self.logger_manager.writer.add_scalar("Training/Reward", np.mean(rewards), self.step)
+		self.logger_manager.writer.add_scalar("Training/Policy Loss", policy_loss, self.step)
+		self.logger_manager.writer.add_scalar("Training/Value Loss", value_loss, self.step)
+		self.logger_manager.writer.add_scalar("Training/Entropy", entropy, self.step)
+		self.logger_manager.writer.add_scalar("Training/Std", std, self.step)
+		self.logger_manager.writer.add_scalar("Training/Inventory", inventory, self.step)
+		self.logger_manager.writer.add_scalar("Training/PnL", pnl, self.step)
+		self.logger_manager.writer.add_scalar("Training/SpreadPenalty", spread_penalty, self.step)
+
+		# Append metrics to CSV
+		with open(self.logger_manager.csv_log_file, "a", newline="") as f:
+			writer_csv = csv.writer(f)
+			writer_csv.writerow([
+				self.step, np.mean(rewards), policy_loss, value_loss,
+				entropy, std, inventory, pnl, spread_penalty
+			])
+
+		self.step += 1
+		return True
+
+
+# -----------------------------------------------------------------------------
+# StockMarketMakingEnv: Custom Gym environment for market making.
+# -----------------------------------------------------------------------------
 class StockMarketMakingEnv(gym.Env):
 	def __init__(
 		self,
@@ -93,7 +123,6 @@ class StockMarketMakingEnv(gym.Env):
 	):
 		super(StockMarketMakingEnv, self).__init__()
 
-		# Initialize market data
 		self.df = df.reset_index(drop=True)
 		self.volatility_window = volatility_window
 
@@ -103,24 +132,23 @@ class StockMarketMakingEnv(gym.Env):
 		self.start_index = start_index
 		self.end_index = end_index
 		self.max_steps = self.end_index - self.start_index
-
 		if self.max_steps <= 0:
 			raise ValueError(f"Invalid episode length: start_index={start_index}, end_index={end_index}")
 
-		# Set trading parameters
+		# Trading parameters
 		self.max_offset = max_offset
 		self.lot_size = lot_size
 		self.inventory_penalty_coeff = inventory_penalty_coeff
 
-		# Initialize trading state
+		# Trading state
 		self.current_step = 0
 		self.current_index = self.start_index
-		self.inventory = 0.0  # Current asset holdings
-		self.cash = 0.0  # Available funds
-		self.prev_pnl = 0.0  # Previous profit/loss
+		self.inventory = 0.0
+		self.cash = 0.0
+		self.prev_pnl = 0.0
 		self.spread_penalty = 0.0
 
-		# Define action space: [bid_offset, ask_offset] from mid price
+		# Define action space: [bid_offset, ask_offset]
 		self.action_space = spaces.Box(
 			low=np.array([-self.max_offset, -self.max_offset], dtype=np.float32),
 			high=np.array([self.max_offset, self.max_offset], dtype=np.float32),
@@ -136,7 +164,7 @@ class StockMarketMakingEnv(gym.Env):
 		)
 
 	def reset(self):
-		"""Reset environment to initial state"""
+		"""Reset environment to initial state."""
 		self.current_step = 0
 		self.current_index = self.start_index
 		self.inventory = 0.0
@@ -146,87 +174,77 @@ class StockMarketMakingEnv(gym.Env):
 		return self._get_observation()
 
 	def get_volatility(self):
+		"""Compute volatility over the specified window."""
 		if self.current_index < self.volatility_window:
 			return 0.0
 		returns = self.df["Close"].pct_change().iloc[self.current_index - self.volatility_window:self.current_index]
 		return returns.std()
 
 	def step(self, action):
-		"""Execute one timestep of the environment"""
+		"""Execute one timestep of the environment."""
 		row = self.df.iloc[self.current_index]
 		mid_price = 0.5 * (row["High"] + row["Low"])
 		spread = row["High"] - row["Low"]
 		volatility = self.get_volatility()
 
-		# Decode action into bid/ask prices
+		# Decode action into bid/ask prices.
 		bid_offset, ask_offset = action
-		agent_bid = max(mid_price + bid_offset, 0.01)  # Ensure positive prices
-		agent_ask = max(mid_price + ask_offset, agent_bid + 0.01)  # Ensure ask > bid
+		agent_bid = max(mid_price + bid_offset, 0.01)
+		agent_ask = max(mid_price + ask_offset, agent_bid + 0.01)
 
-		# Compute a penalty based on spread and volatility.
-		# Naive idea: tight spread on low volatility, wide spread on high volatility.
+		# Compute spread penalty (encourage wider spreads in volatile markets).
 		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * 2)
 		self.spread_penalty = max(self.spread_penalty, 0) * -0.1
 
-		# Simulate order execution
-		fill_bid_amount, fill_ask_amount, fill_bid_price, fill_ask_price = self._simulate_fills(
-			agent_bid, agent_ask, row
-		)
+		# Simulate order execution.
+		fill_bid_amount, fill_ask_amount, fill_bid_price, fill_ask_price = self._simulate_fills(agent_bid, agent_ask, row)
 
-		# Update inventory and cash based on fills
+		# Update inventory and cash.
 		self.inventory += fill_bid_amount
 		self.cash -= fill_bid_amount * fill_bid_price
 		self.inventory -= fill_ask_amount
 		self.cash += fill_ask_amount * fill_ask_price
 
-		# Calculate PnL
+		# Compute mark-to-market PnL.
 		mark_to_market = self.inventory * row["Close"]
 		current_pnl = self.cash + mark_to_market
 
-		# Calculate reward components
+		# Calculate reward components.
 		incremental_pnl = current_pnl - self.prev_pnl
 		inventory_penalty = self.inventory_penalty_coeff * (self.inventory ** 2)
-		raw_reward = np.clip(incremental_pnl - inventory_penalty + spread_penalty, -10, 10)
-		# Normalize
+		raw_reward = np.clip(incremental_pnl - inventory_penalty + self.spread_penalty, -10, 10)
 		reward = np.tanh(raw_reward / 10.0) * 10.0
 
-		self.prev_pnl = current_pnl  # Store for next step
-
-		# Update environment state
+		self.prev_pnl = current_pnl
 		self.current_step += 1
 		self.current_index += 1
-		done = self.current_index >= self.end_index  # Episode completion check
+		done = self.current_index >= self.end_index
 
 		obs = self._get_observation()
 		info = {"pnl": current_pnl, "inventory": self.inventory, "spread_penalty": self.spread_penalty}
-
 		return obs, reward, done, info
 
 	def _simulate_fills(self, agent_bid, agent_ask, row):
-		"""Simulate order execution based on market conditions"""
+		"""Simulate order fills based on market data."""
 		fill_bid_amount = 0.0
 		fill_ask_amount = 0.0
 		fill_bid_price = agent_bid
 		fill_ask_price = agent_ask
 
-		# Calculate bid fill amount based on price and market volume
+		# Bid fill simulation.
 		if agent_bid >= row["High"]:
-			# Full fill if bid is above market high
 			fill_bid_amount = self.lot_size
 			fill_bid_price = row["High"]
 		elif row["Low"] < agent_bid < row["High"]:
-			# Partial fill based on price proximity to market range
 			proximity = (agent_bid - row["Low"]) / (row["High"] - row["Low"])
 			fill_bid_amount = self.lot_size * proximity * (row["Volume"] / 1e6)
 			fill_bid_amount = min(fill_bid_amount, self.lot_size)
 
-		# Calculate ask fill amount based on price and market volume
+		# Ask fill simulation.
 		if agent_ask <= row["Low"]:
-			# Full fill if ask is below market low
 			fill_ask_amount = self.lot_size
 			fill_ask_price = row["Low"]
 		elif row["Low"] < agent_ask < row["High"]:
-			# Partial fill based on price proximity to market range
 			proximity = (row["High"] - agent_ask) / (row["High"] - row["Low"])
 			fill_ask_amount = self.lot_size * proximity * (row["Volume"] / 1e6)
 			fill_ask_amount = min(fill_ask_amount, self.lot_size)
@@ -234,125 +252,30 @@ class StockMarketMakingEnv(gym.Env):
 		return fill_bid_amount, fill_ask_amount, fill_bid_price, fill_ask_price
 
 	def _get_observation(self):
-		"""Construct current environment observation"""
+		"""Construct the current observation."""
 		row = self.df.iloc[self.current_index]
 		mid_price = 0.5 * (row["High"] + row["Low"])
 		spread = row["High"] - row["Low"]
-		steps_remaining = self.max_steps - self.current_step
-		steps_remaining = max(steps_remaining, 0)
-
-		return np.array([
-			self.inventory,
-			mid_price,
-			spread,
-			steps_remaining
-		], dtype=np.float32)
+		steps_remaining = max(self.max_steps - self.current_step, 0)
+		return np.array([self.inventory, mid_price, spread, steps_remaining], dtype=np.float32)
 
 	def render(self, mode='human'):
-		"""Display current environment state"""
+		"""Display current state."""
 		row = self.df.iloc[self.current_index]
 		current_pnl = self.cash + self.inventory * row["Close"]
-		print(
-			f"Step: {self.current_step}, Index: {self.current_index}, "
-			f"Inventory: {self.inventory:.2f}, PnL: {current_pnl:.2f}"
-		)
-
-# Function to Evaluate Market Makers and Collect PnL Over Time
-def evaluate_market_makers(benchmarks, df_data):
-	results = {}
-	benchmark_pnl_series = {}
-	
-	for name, market_maker in benchmarks.items():
-		pnl_series = []
-		pnl, trades = 0, 0
-		
-		for index, row in df_data.iterrows():
-			mid_price = 0.5 * (row["High"] + row["Low"])
-			volatility = df_data["Close"].pct_change().rolling(50).std().iloc[index] if index >= 50 else 0.0
-			
-			if isinstance(market_maker, VolatilityAdaptiveMarketMaker):
-				bid, ask = market_maker.get_quotes(mid_price, volatility)
-			else:
-				bid, ask = market_maker.get_quotes(mid_price)
-
-			if row["Low"] <= bid:
-				pnl += mid_price - bid  # Profit from buy
-				trades += 1
-			if row["High"] >= ask:
-				pnl += ask - mid_price  # Profit from sell
-				trades += 1
-			
-			pnl_series.append(pnl)
-		
-		results[name] = {"PnL": pnl, "Trades": trades}
-		benchmark_pnl_series[name] = pnl_series if pnl_series else [0] * len(df_data)
-	
-	return results, benchmark_pnl_series
+		print(f"Step: {self.current_step}, Index: {self.current_index}, "
+			  f"Inventory: {self.inventory:.2f}, PnL: {current_pnl:.2f}")
 
 
-def evaluate_model(model, vec_env, num_episodes=1):
-	"""Evaluate trained model performance"""
-	rewards = []
-	pnls = []
-	for ep_idx in range(num_episodes):
-		print("episode ", ep_idx)
-		obs = vec_env.reset()
-		done = False
-		episode_reward = 0.0
-		iter = 0
-		while not done:
-			if iter > 10000:
-				break
-			action, _states = model.predict(obs, deterministic=True)
-			obs, reward, done, infos = vec_env.step(action)
-			episode_reward += reward
-			iter += 1
-		rewards.append(episode_reward)
-		if isinstance(infos, list) and len(infos) > 0:
-			pnls.append(infos[0].get("pnl", 0.0))
-		else:
-			pnls.append(0.0)
-	return np.mean(rewards), np.mean(pnls), pnls
-
-def fetch_historical_stock_data(ticker: str, period: str = "4d", interval: str = "1m"):
-	"""Download historical stock data using Yahoo Finance"""
-	stock = yf.Ticker(ticker)
-	df = stock.history(period=period, interval=interval)
-	df.reset_index(inplace=True)
-	return df
-
-def objective(trial):
-	"""Objective function for hyperparameter optimization with Optuna"""
-	# Suggest hyperparameters
-	learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 1e-2)
-	ent_coef = trial.suggest_loguniform("ent_coef", 1e-4, 0.1)
-	clip_range = trial.suggest_uniform("clip_range", 0.1, 0.4)
-	
-	# Create and train model with suggested parameters
-	model = PPO(
-		"MlpPolicy",
-		DummyVecEnv([lambda: StockMarketMakingEnv(df=fetch_evaluation_data("AAPL", "1mo", "1m"), max_offset=1.0, lot_size=100, inventory_penalty_coeff=0.001, start_index=0, end_index=1000)]),
-		learning_rate=learning_rate,
-		ent_coef=ent_coef,
-		clip_range=clip_range,
-		verbose=0
-	)
-	model.learn(total_timesteps=50000)
-	
-	# Evaluate model performance
-	eval_df = fetch_evaluation_data(ticker="AAPL", period="8d", interval="1m")
-	eval_env = DummyVecEnv([lambda: StockMarketMakingEnv(df=eval_df, max_offset=1.0, lot_size=100, inventory_penalty_coeff=0.001, start_index=0, end_index=len(eval_df) - 1)])
-	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
-	
-	avg_reward, _1, _2 = evaluate_model(model, eval_env, num_episodes=5)
-	return avg_reward
-
+# -----------------------------------------------------------------------------
+# Market Maker Benchmark Strategies
+# -----------------------------------------------------------------------------
 class FixedSpreadMarketMaker:
 	def __init__(self, spread=0.10):
 		self.spread = spread
 
 	def get_quotes(self, mid_price):
-		return mid_price - self.spread / 2, mid_price + self.spread / 2  # (bid, ask)
+		return mid_price - self.spread / 2, mid_price + self.spread / 2
 
 
 class VolatilityAdaptiveMarketMaker:
@@ -362,7 +285,7 @@ class VolatilityAdaptiveMarketMaker:
 
 	def get_quotes(self, mid_price, volatility):
 		spread = self.base_spread * (1 + self.volatility_multiplier * volatility)
-		return mid_price - spread / 2, mid_price + spread / 2  # (bid, ask)
+		return mid_price - spread / 2, mid_price + spread / 2
 
 
 class TWAPMarketMaker:
@@ -371,194 +294,325 @@ class TWAPMarketMaker:
 
 	def get_quotes(self, mid_price):
 		spread = self.base_spread * random.uniform(0.5, 1.5)
-		return mid_price - spread / 2, mid_price + spread / 2  # (bid, ask)
-
-# Visualization Function for PPO vs Benchmark Strategies
-def plot_ppo_vs_benchmarks(ppo_pnl, benchmark_pnls, labels):
-	plt.figure(figsize=(12, 6))
-	plt.plot(ppo_pnl, label='PPO Agent', linestyle='-', linewidth=2)
-	for label in labels:
-		plt.plot(benchmark_pnls[label], label=label, linestyle='--', linewidth=2)
-	
-	plt.xlabel("Time Steps")
-	plt.ylabel("Cumulative PnL")
-	plt.title("PPO Market Maker vs Benchmark Strategies")
-	plt.legend()
-	plt.show()
+		return mid_price - spread / 2, mid_price + spread / 2
 
 
-if __name__ == "__main__":
-	# Configuration parameters
-	STOCK_TICKER = "AAPL"
-	DATA_PERIOD = "4d"
-	DATA_INTERVAL = "1m"
-	MAX_OFFSET = 1.0
-	LOT_SIZE = 100
-	INVENTORY_PENALTY = 0.001
-	TOTAL_TIMESTEPS = 50000
-	EVAL_EPISODES = 1
-	MODEL_SAVE_FREQ = 10000
-	MODEL_SAVE_PATH = "./models/"
+# -----------------------------------------------------------------------------
+# MarketDataFetcher: Download historical stock data.
+# -----------------------------------------------------------------------------
+class MarketDataFetcher:
+	@staticmethod
+	def fetch_data(ticker: str, period: str = "4d", interval: str = "1m") -> pd.DataFrame:
+		stock = yf.Ticker(ticker)
+		df = stock.history(period=period, interval=interval)
+		df.reset_index(inplace=True)
+		return df
 
-	os.makedirs(MODEL_SAVE_PATH, exist_ok=True)  # Create model save directory
 
-	# Fetch and prepare market data
-	print(f"Fetching historical data for {STOCK_TICKER}...")
-	df_data = fetch_historical_stock_data(
-		ticker=STOCK_TICKER,
-		period=DATA_PERIOD,
-		interval=DATA_INTERVAL
-	)
-	df_data.dropna(inplace=True)  # Remove missing values
-	print(f"Fetched {len(df_data)} rows of data.")
+# -----------------------------------------------------------------------------
+# PPOTrainer: Wraps PPO training including callbacks and model saving.
+# -----------------------------------------------------------------------------
+class PPOTrainer:
+	def __init__(self, vec_env, model_save_path: str, model_params: dict, callbacks: list):
+		self.vec_env = vec_env
+		self.model_save_path = model_save_path
+		self.callbacks = callbacks
+		self.model = PPO("MlpPolicy", vec_env, **model_params)
 
-	# Initialize trading environment
-	print("Creating the market-making environment...")
-	env = StockMarketMakingEnv(
-		df=df_data,
-		max_offset=MAX_OFFSET,
-		lot_size=LOT_SIZE,
-		inventory_penalty_coeff=INVENTORY_PENALTY,
-		start_index=0,
-		end_index=len(df_data) - 1
-	)
+	def train(self, total_timesteps: int):
+		self.model.learn(total_timesteps=total_timesteps, callback=self.callbacks)
 
-	# Setup vectorized and normalized environment
-	print("Wrapping the environment with DummyVecEnv and VecNormalize...")
-	vec_env = DummyVecEnv([lambda: env])
-	vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.)
+	def save(self, filename: str):
+		self.model.save(filename)
 
-	# Initialize PPO model with specific architecture
-	print("Initializing PPO agent...")
-	model = PPO(
-		"MlpPolicy",
-		vec_env,
-		verbose=1,
-		learning_rate=0.002,
-		clip_range=0.3,
-		gae_lambda=0.95,
-		gamma=0.99,
-		n_steps=2048,
-		batch_size=64,
-		ent_coef=0.1,
-		vf_coef=0.25,
-		max_grad_norm=0.3,
-		policy_kwargs=dict(
-			net_arch=dict(pi=[256, 256, 256], vf=[256, 256, 256]),
-			activation_fn=torch.nn.LeakyReLU,
+	def get_model(self):
+		return self.model
+
+
+# -----------------------------------------------------------------------------
+# ModelEvaluator: Evaluate a trained model.
+# -----------------------------------------------------------------------------
+class ModelEvaluator:
+	def __init__(self, model, vec_env):
+		self.model = model
+		self.vec_env = vec_env
+
+	def evaluate(self, num_episodes: int = 1):
+		rewards = []
+		pnls = []
+		for ep_idx in range(num_episodes):
+			obs = self.vec_env.reset()
+			done = False
+			episode_reward = 0.0
+			iter_count = 0
+			while not done:
+				if iter_count > 10000:
+					break
+				action, _ = self.model.predict(obs, deterministic=True)
+				obs, reward, done, infos = self.vec_env.step(action)
+				episode_reward += reward
+				iter_count += 1
+			rewards.append(episode_reward)
+			if isinstance(infos, list) and len(infos) > 0:
+				pnls.append(infos[0].get("pnl", 0.0))
+			else:
+				pnls.append(0.0)
+		return np.mean(rewards), np.mean(pnls), pnls
+
+
+# -----------------------------------------------------------------------------
+# BenchmarkEvaluator: Evaluate benchmark market maker strategies.
+# -----------------------------------------------------------------------------
+class BenchmarkEvaluator:
+	def __init__(self, benchmarks: dict, df_data: pd.DataFrame):
+		self.benchmarks = benchmarks
+		self.df_data = df_data
+
+	def evaluate(self):
+		results = {}
+		benchmark_pnl_series = {}
+		for name, market_maker in self.benchmarks.items():
+			pnl_series = []
+			pnl, trades = 0, 0
+			for index, row in self.df_data.iterrows():
+				mid_price = 0.5 * (row["High"] + row["Low"])
+				volatility = (self.df_data["Close"].pct_change()
+							  .rolling(50).std().iloc[index] if index >= 50 else 0.0)
+				# Some strategies require volatility.
+				if isinstance(market_maker, VolatilityAdaptiveMarketMaker):
+					bid, ask = market_maker.get_quotes(mid_price, volatility)
+				else:
+					bid, ask = market_maker.get_quotes(mid_price)
+				if row["Low"] <= bid:
+					pnl += mid_price - bid
+					trades += 1
+				if row["High"] >= ask:
+					pnl += ask - mid_price
+					trades += 1
+				pnl_series.append(pnl)
+			results[name] = {"PnL": pnl, "Trades": trades}
+			benchmark_pnl_series[name] = pnl_series if pnl_series else [0] * len(self.df_data)
+		return results, benchmark_pnl_series
+
+
+# -----------------------------------------------------------------------------
+# Visualizer: Plot various evaluation and training performance metrics.
+# -----------------------------------------------------------------------------
+class Visualizer:
+	@staticmethod
+	def plot_ppo_vs_benchmarks(ppo_pnl, benchmark_pnls, labels):
+		plt.figure(figsize=(12, 6))
+		plt.plot(ppo_pnl, label='PPO Agent', linestyle='-', linewidth=2)
+		for label in labels:
+			plt.plot(benchmark_pnls[label], label=label, linestyle='--', linewidth=2)
+		plt.xlabel("Time Steps")
+		plt.ylabel("Cumulative PnL")
+		plt.title("PPO Market Maker vs Benchmark Strategies")
+		plt.legend()
+		plt.show()
+
+	@staticmethod
+	def plot_agent_performance(perf_data: dict):
+		"""
+		perf_data should be a dict with keys:
+			market_mid_prices, agent_bids, agent_asks, inventory_history,
+			pnl_history, volatility_history.
+		"""
+		plt.figure(figsize=(15, 12))
+
+		plt.subplot(4, 1, 1)
+		plt.plot(perf_data["market_mid_prices"], label='Market Mid Price')
+		plt.plot(perf_data["agent_bids"], label='Agent Bid')
+		plt.plot(perf_data["agent_asks"], label='Agent Ask')
+		plt.legend()
+		plt.title('Quotes and Market Prices')
+
+		plt.subplot(4, 1, 2)
+		plt.plot(perf_data["inventory_history"])
+		plt.title('Inventory Over Time')
+
+		plt.subplot(4, 1, 3)
+		plt.plot(perf_data["pnl_history"])
+		plt.title('PnL Over Time')
+
+		plt.subplot(4, 1, 4)
+		plt.plot(perf_data["volatility_history"], color='red', label='Volatility')
+		plt.legend()
+		plt.title('Market Volatility Over Time')
+
+		plt.tight_layout()
+		plt.show()
+
+
+# -----------------------------------------------------------------------------
+# MarketMakerRunner: Orchestrates data fetching, training, evaluation, and visualization.
+# -----------------------------------------------------------------------------
+class MarketMakerRunner:
+	def __init__(self, config: dict):
+		self.config = config
+		set_seed(0)
+		self.data_fetcher = MarketDataFetcher()
+		self.logger_manager = LoggerManager(log_dir=config.get("LOG_DIR", "logs"))
+
+	def run(self):
+		# Fetch historical market data.
+		print(f"Fetching historical data for {self.config['STOCK_TICKER']}...")
+		df_data = self.data_fetcher.fetch_data(
+			ticker=self.config["STOCK_TICKER"],
+			period=self.config["DATA_PERIOD"],
+			interval=self.config["DATA_INTERVAL"]
 		)
-	)
+		df_data.dropna(inplace=True)
+		print(f"Fetched {len(df_data)} rows of data.")
 
-	# Configure training callbacks
-	print("Setting up callbacks...")
-	checkpoint_callback = CheckpointCallback(
-		save_freq=MODEL_SAVE_FREQ,
-		save_path=MODEL_SAVE_PATH,
-		name_prefix='ppo_market_maker'
-	)
-	training_logging_callback = TrainingLoggingCallback()
+		# Create the training environment.
+		env = StockMarketMakingEnv(
+			df=df_data,
+			max_offset=self.config["MAX_OFFSET"],
+			lot_size=self.config["LOT_SIZE"],
+			inventory_penalty_coeff=self.config["INVENTORY_PENALTY"],
+			start_index=0,
+			end_index=len(df_data) - 1
+		)
+		vec_env = DummyVecEnv([lambda: env])
+		vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
-	# Train the model
-	print("Training the PPO agent...")
-	model.learn(
-		total_timesteps=TOTAL_TIMESTEPS,
-		callback=[checkpoint_callback, training_logging_callback]
-	)
+		# Set up PPO model parameters.
+		model_params = {
+			"verbose": 1,
+			"learning_rate": 0.002,
+			"clip_range": 0.3,
+			"gae_lambda": 0.95,
+			"gamma": 0.99,
+			"n_steps": 2048,
+			"batch_size": 64,
+			"ent_coef": 0.1,
+			"vf_coef": 0.25,
+			"max_grad_norm": 0.3,
+			"policy_kwargs": dict(
+				net_arch=dict(pi=[256, 256, 256], vf=[256, 256, 256]),
+				activation_fn=torch.nn.LeakyReLU,
+			)
+		}
 
-	# Save environment normalization statistics
-	vec_env.save(os.path.join(MODEL_SAVE_PATH, "vec_normalize.pkl"))
-	print(f"Saved VecNormalize statistics.")
+		# Set up callbacks.
+		model_save_path = self.config["MODEL_SAVE_PATH"]
+		os.makedirs(model_save_path, exist_ok=True)
+		checkpoint_callback = CheckpointCallback(
+			save_freq=self.config["MODEL_SAVE_FREQ"],
+			save_path=model_save_path,
+			name_prefix='ppo_market_maker'
+		)
+		training_logging_callback = TrainingLoggingCallback(self.logger_manager)
+		callbacks = [checkpoint_callback, training_logging_callback]
 
-	# Evaluate on new data
-	eval_df = fetch_historical_stock_data(ticker="AAPL", period="8d", interval="1m")
-	eval_df.head()
-	eval_env = DummyVecEnv([lambda: StockMarketMakingEnv(df=eval_df, max_offset=1.0, lot_size=100, inventory_penalty_coeff=0.001, start_index=0, end_index=len(eval_df) - 1)])
-	eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
+		# Initialize and train the PPO agent.
+		print("Initializing PPO agent...")
+		trainer = PPOTrainer(vec_env, model_save_path, model_params, callbacks)
+		print("Training the PPO agent...")
+		trainer.train(total_timesteps=self.config["TOTAL_TIMESTEPS"])
+		trainer.save(os.path.join(model_save_path, "final_ppo_model"))
+		vec_env.save(os.path.join(model_save_path, "vec_normalize.pkl"))
+		print("Saved PPO model and VecNormalize statistics.")
 
-	print("Evaluating on a different time period...")
-	avg_reward, avg_pnl, ppo_pnls = evaluate_model(model, eval_env, num_episodes=1)
-	print(f"Evaluation Results - Avg Reward: {avg_reward:.2f}, Avg PnL: {avg_pnl:.2f}")
-	# Benchmark Comparison
-	benchmarks = {
-	"Fixed Spread MM": FixedSpreadMarketMaker(spread=0.10),
-	"Volatility Adaptive MM": VolatilityAdaptiveMarketMaker(base_spread=0.05, volatility_multiplier=1.5),
-	"TWAP MM": TWAPMarketMaker(base_spread=0.05)
+		# Evaluate the model on new data.
+		print("Fetching evaluation data...")
+		eval_df = self.data_fetcher.fetch_data(
+			ticker=self.config["STOCK_TICKER"],
+			period="8d",  # For evaluation, a different period.
+			interval=self.config["DATA_INTERVAL"]
+		)
+		eval_df.dropna(inplace=True)
+		eval_env = DummyVecEnv([lambda: StockMarketMakingEnv(
+			df=eval_df,
+			max_offset=self.config["MAX_OFFSET"],
+			lot_size=self.config["LOT_SIZE"],
+			inventory_penalty_coeff=self.config["INVENTORY_PENALTY"],
+			start_index=0,
+			end_index=len(eval_df) - 1
+		)])
+		eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
+
+		evaluator = ModelEvaluator(trainer.get_model(), eval_env)
+		print("Evaluating on a different time period...")
+		avg_reward, avg_pnl, ppo_pnls = evaluator.evaluate(num_episodes=self.config["EVAL_EPISODES"])
+		print(f"Evaluation Results - Avg Reward: {avg_reward:.2f}, Avg PnL: {avg_pnl:.2f}")
+
+		# Benchmark evaluation.
+		benchmarks = {
+			"Fixed Spread MM": FixedSpreadMarketMaker(spread=0.10),
+			"Volatility Adaptive MM": VolatilityAdaptiveMarketMaker(base_spread=0.05, volatility_multiplier=1.5),
+			"TWAP MM": TWAPMarketMaker(base_spread=0.05)
+		}
+		benchmark_evaluator = BenchmarkEvaluator(benchmarks, eval_df)
+		results, benchmark_pnls = benchmark_evaluator.evaluate()
+		print("Benchmark evaluation results:")
+		for k, v in results.items():
+			print(f"{k}: {v}")
+
+		# Plot PPO vs. benchmark performance.
+		Visualizer.plot_ppo_vs_benchmarks(ppo_pnls, benchmark_pnls, list(benchmarks.keys()))
+
+		# Run a single episode and record performance for visualization.
+		print("\nRunning a single episode for performance visualization:")
+		inventory_history = []
+		pnl_history = []
+		agent_bids = []
+		agent_asks = []
+		market_mid_prices = []
+		volatility_history = []
+
+		obs = eval_env.reset()
+		done = False
+		iter_count = 0
+
+		# Lists for recording quotes.
+		while not done and iter_count < 10000:
+			action, _ = trainer.get_model().predict(obs, deterministic=True)
+			obs, reward, done, infos = eval_env.step(action)
+			underlying_env = eval_env.envs[0]
+			inventory_history.append(underlying_env.inventory)
+			pnl_history.append(infos[0].get("pnl", 0.0))
+			# Get the last row used for computing quotes.
+			row = underlying_env.df.iloc[underlying_env.current_index - 1]
+			mid_price = 0.5 * (row["High"] + row["Low"])
+			agent_bids.append(mid_price + action[0][0])
+			agent_asks.append(mid_price + action[0][1])
+			market_mid_prices.append(mid_price)
+			volatility_history.append(underlying_env.get_volatility())
+			iter_count += 1
+
+		perf_data = {
+			"market_mid_prices": market_mid_prices,
+			"agent_bids": agent_bids,
+			"agent_asks": agent_asks,
+			"inventory_history": inventory_history,
+			"pnl_history": pnl_history,
+			"volatility_history": volatility_history
+		}
+		Visualizer.plot_agent_performance(perf_data)
+
+
+# -----------------------------------------------------------------------------
+# Main entry point
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+	# Configuration parameters.
+	config = {
+		"STOCK_TICKER": "AAPL",
+		"DATA_PERIOD": "4d",
+		"DATA_INTERVAL": "1m",
+		"MAX_OFFSET": 1.0,
+		"LOT_SIZE": 100,
+		"INVENTORY_PENALTY": 0.001,
+		"TOTAL_TIMESTEPS": 50000,
+		"EVAL_EPISODES": 1,
+		"MODEL_SAVE_FREQ": 10000,
+		"MODEL_SAVE_PATH": "./models",
+		"LOG_DIR": "logs"
 	}
 
-	results, benchmark_pnls = evaluate_market_makers(benchmarks, eval_df)
-	
-	labels = ["Fixed Spread MM", "Volatility Adaptive MM", "TWAP MM"]
-	plot_ppo_vs_benchmarks(ppo_pnls, benchmark_pnls, labels)
+	runner = MarketMakerRunner(config)
+	runner.run()
 
-	# Visualization of agent performance
-	print("\nRunning a single episode with visualization:")
-	inventory_history = []
-	pnl_history = []
-	bid_offsets = []
-	ask_offsets = []
-	agent_bids = []
-	agent_asks = []
-	market_bids = []
-	market_asks = []
-	market_mid_prices = []
-	market_spreads = []
-	volatility_history = []
-
-	obs = eval_env.reset()
-	done = False
-	iter = 0
-	while not done:
-		action, _states = model.predict(obs, deterministic=True)
-		obs, reward, done, infos = eval_env.step(action)
-		if done or iter > 10000:
-			break
-		underlying_env = eval_env.envs[0]
-		inventory_history.append(underlying_env.inventory)
-		pnl_history.append(infos[0].get("pnl", 0.0))
-		bid_offsets.append(action[0][0])
-		ask_offsets.append(action[0][1])
-		row = underlying_env.df.iloc[underlying_env.current_index - 1]
-		mid_price = 0.5 * (row["High"] + row["Low"])
-		agent_bids.append(mid_price + action[0][0])
-		agent_asks.append(mid_price + action[0][1])
-		market_bids.append(row["Low"])
-		market_asks.append(row["High"])
-		market_mid_prices.append(mid_price)
-		market_spreads.append(row["High"] - row["Low"])
-		volatility_history.append(underlying_env._get_volatility(underlying_env.current_index))
-		iter += 1
-
-	plt.figure(figsize=(15, 12))
-	plt.subplot(4, 1, 1)
-	plt.plot(market_mid_prices, label='Market Mid Price')
-	plt.plot(agent_bids, label='Agent Bid')
-	plt.plot(agent_asks, label='Agent Ask')
-	plt.legend()
-	plt.title('Quotes and Market Prices')
-
-	plt.subplot(4, 1, 2)
-	plt.plot(inventory_history)
-	plt.title('Inventory Over Time')
-
-	plt.subplot(4, 1, 3)
-	plt.plot(pnl_history)
-	plt.title('PnL Over Time')
-
-	plt.subplot(4, 1, 4)
-	plt.plot(volatility_history, color='red', label='Volatility')
-	plt.legend()
-	plt.title('Market Volatility Over Time')
-
-	plt.tight_layout()
-	plt.show()
-
-# # Run hyperparameter tuning
-# study = optuna.create_study(direction="maximize")
-# study.optimize(objective, n_trials=10)
-# print(f"Best hyperparameters: {study.best_params}")
-# Visualize optimization results
-# fig = optuna.visualization.plot_param_importances(study)
-# fig.show()
-
-# fig2 = optuna.visualization.plot_optimization_history(study)
-# fig2.show()
+	# If you wish to run hyperparameter tuning using Optuna, you could add a separate class.
