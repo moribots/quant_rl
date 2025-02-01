@@ -143,7 +143,7 @@ class StockMarketMakingEnv(gym.Env):
 		start_index: int = 0,
 		end_index: int = None,
 		volatility_window: int = 50,
-		rollover: bool = True  # New parameter: if True, maintain state across episodes
+		rollover: bool = False  # New parameter: if True, maintain state across episodes
 	):
 		"""
 		Initialize the environment with market data and trading parameters.
@@ -208,10 +208,12 @@ class StockMarketMakingEnv(gym.Env):
 		"""
 		Reset the environment at the beginning of an episode.
 		
-		If rollover is False, this method resets the agent's state (inventory, cash, prev_pnl)
-		back to zero. If rollover is True, the agent's state is preserved across episodes.
-		In rollover mode, the time step counter is reset, and the current index is either
-		maintained (for strict continuity) or updated (e.g., rolled forward) if desired.
+		In non-rollover mode, this method resets the agent's state (inventory, cash, prev_pnl)
+		to zero and resets the current_index to the start_index.
+		
+		In rollover mode, the agent's state is preserved. However, to avoid out-of-bounds
+		errors and to simulate continuity, we reset the time counter and wrap the market 
+		data index back to the start of the defined segment.
 		"""
 		self.current_step = 0
 		if not self.rollover:
@@ -222,12 +224,10 @@ class StockMarketMakingEnv(gym.Env):
 			self.prev_pnl = 0.0
 			self.spread_penalty = 0.0
 		else:
-			# Rollover mode: maintain agent's state.
-			# Optionally, you can roll forward the current_index if you prefer non-overlapping segments.
-			# For example, uncomment the following line to shift the start by the episode length:
-			# self.current_index = min(self.current_index + self.max_steps, self.end_index)
-			# Otherwise, for strict continuity, leave current_index unchanged.
-			self.spread_penalty = 0.0  # Reset any episode-specific penalties if desired.
+			# Rollover mode: preserve inventory, cash, and prev_pnl.
+			# To ensure we can index the DataFrame, wrap around the market data index.
+			self.current_index = self.start_index  # Reset market data to beginning.
+			self.spread_penalty = 0.0  # Clear episode-specific penalties.
 		return self._get_observation()
 
 	def get_volatility(self):
@@ -245,6 +245,11 @@ class StockMarketMakingEnv(gym.Env):
 		Execute one step in the environment given the agent's action.
 		The action is used to adjust the bid and ask quotes.
 		"""
+		# Ensure we do not index beyond our DataFrame.
+		if self.current_index >= self.end_index:
+			# When market data is exhausted, signal end of episode.
+			return self.reset(), 0.0, True, {}
+
 		# Get the current market data row.
 		row = self.df.iloc[self.current_index]
 		mid_price = 0.5 * (row["High"] + row["Low"])
