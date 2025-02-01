@@ -246,9 +246,9 @@ class StockMarketMakingEnv(gym.Env):
 		market_bid = row["Low"]
 		off_book_market_penalty = 0.0
 		if agent_ask < market_ask:
-			reward += off_book_market_penalty_factor * (market_ask - agent_ask)
+			off_book_market_penalty = off_book_market_penalty_factor * (market_ask - agent_ask)
 		if agent_bid > market_bid:
-			reward += off_book_market_penalty_factor * (agent_bid - market_bid)
+			off_book_market_penalty = off_book_market_penalty_factor * (agent_bid - market_bid)
 
 
 		# Simulate order execution using market data.
