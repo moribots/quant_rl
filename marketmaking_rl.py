@@ -142,16 +142,20 @@ class StockMarketMakingEnv(gym.Env):
 		inventory_penalty_coeff: float = 0.0,
 		start_index: int = 0,
 		end_index: int = None,
-		volatility_window: int = 50
+		volatility_window: int = 50,
+		rollover: bool = True  # New parameter: if True, maintain state across episodes
 	):
 		"""
 		Initialize the environment with market data and trading parameters.
+		
 		- df: DataFrame with historical market data.
 		- max_offset: Maximum allowed offset from the market mid-price for quotes.
 		- lot_size: Trading lot size (number of shares/contracts per trade).
 		- inventory_penalty_coeff: Coefficient to penalize large inventory positions.
 		- start_index and end_index: Define the segment of the data to use.
 		- volatility_window: Window size for calculating price volatility.
+		- rollover: If True, the agent's state (inventory, cash, PnL) is maintained
+					between episodes, avoiding forced liquidation at the end of each episode.
 		"""
 		super(StockMarketMakingEnv, self).__init__()
 		self.df = df.reset_index(drop=True)
@@ -172,12 +176,16 @@ class StockMarketMakingEnv(gym.Env):
 		self.inventory_penalty_coeff = inventory_penalty_coeff
 
 		# Initialize the environment's trading state.
+		# These variables will be maintained across episodes if rollover is True.
 		self.current_step = 0
 		self.current_index = self.start_index
 		self.inventory = 0.0  # How many assets the agent holds.
 		self.cash = 0.0       # Cash available from trading.
 		self.prev_pnl = 0.0   # Previous profit and loss.
 		self.spread_penalty = 0.0  # Penalty for setting narrow spreads.
+
+		# Store the rollover mode flag.
+		self.rollover = rollover
 
 		# Define the action space.
 		# The agent chooses two numbers: one for bid offset and one for ask offset.
@@ -198,15 +206,28 @@ class StockMarketMakingEnv(gym.Env):
 
 	def reset(self):
 		"""
-		Reset the environment to the initial state.
-		This is called at the beginning of each episode.
+		Reset the environment at the beginning of an episode.
+		
+		If rollover is False, this method resets the agent's state (inventory, cash, prev_pnl)
+		back to zero. If rollover is True, the agent's state is preserved across episodes.
+		In rollover mode, the time step counter is reset, and the current index is either
+		maintained (for strict continuity) or updated (e.g., rolled forward) if desired.
 		"""
 		self.current_step = 0
-		self.current_index = self.start_index
-		self.inventory = 0.0
-		self.spread_penalty = 0.0
-		self.cash = 0.0
-		self.prev_pnl = 0.0
+		if not self.rollover:
+			# Standard reset: clear the agent's state.
+			self.current_index = self.start_index
+			self.inventory = 0.0
+			self.cash = 0.0
+			self.prev_pnl = 0.0
+			self.spread_penalty = 0.0
+		else:
+			# Rollover mode: maintain agent's state.
+			# Optionally, you can roll forward the current_index if you prefer non-overlapping segments.
+			# For example, uncomment the following line to shift the start by the episode length:
+			# self.current_index = min(self.current_index + self.max_steps, self.end_index)
+			# Otherwise, for strict continuity, leave current_index unchanged.
+			self.spread_penalty = 0.0  # Reset any episode-specific penalties if desired.
 		return self._get_observation()
 
 	def get_volatility(self):
@@ -237,11 +258,12 @@ class StockMarketMakingEnv(gym.Env):
 		agent_ask = max(mid_price + ask_offset, agent_bid + 1e-3)
 
 		# Compute a penalty based on how tight the spread is relative to volatility.
-		volatility_factor = 2.0
-		spread_penalty_factor = 100.0
-		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * volatility_factor) 
+		volatility_factor = 100.0
+		spread_penalty_factor = 10.0
+		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * volatility_factor)
 		self.spread_penalty = max(self.spread_penalty, 0) * spread_penalty_factor
 
+		# Compute an off-book market penalty if the agent's quotes are too aggressive.
 		off_book_market_penalty_factor = 10.0
 		market_ask = row["High"]
 		market_bid = row["Low"]
@@ -250,7 +272,6 @@ class StockMarketMakingEnv(gym.Env):
 			off_book_market_penalty = off_book_market_penalty_factor * (market_ask - agent_ask)
 		if agent_bid > market_bid:
 			off_book_market_penalty = off_book_market_penalty_factor * (agent_bid - market_bid)
-
 
 		# Simulate order execution using market data.
 		fill_bid_amount, fill_ask_amount, fill_bid_price, fill_ask_price = self._simulate_fills(agent_bid, agent_ask, row)
@@ -266,9 +287,9 @@ class StockMarketMakingEnv(gym.Env):
 		current_pnl = self.cash + mark_to_market
 
 		# Compute the reward from this step.
-		# Reward is based on the incremental PnL minus an inventory penalty and the spread penalty.
+		# Reward is based on the incremental PnL minus an inventory penalty, spread penalty,
+		# and off-book market penalty.
 		incremental_pnl = current_pnl - self.prev_pnl
-		# The inventory penalty avoids risk by penalizing inventory accumulation quadratically, hence guiding the agent to reduce exposure.
 		inventory_penalty = self.inventory_penalty_coeff * (self.inventory ** 2)
 		raw_reward = incremental_pnl - inventory_penalty - self.spread_penalty - off_book_market_penalty
 		reward = np.tanh(raw_reward / 1000) * 10.0  # Normalize reward using tanh.
@@ -283,8 +304,14 @@ class StockMarketMakingEnv(gym.Env):
 
 		# Construct the new observation and additional info.
 		obs = self._get_observation()
-		info = {"pnl": current_pnl, "inventory": self.inventory, "spread_penalty": self.spread_penalty,
-		"inventory_penalty": inventory_penalty, "off_book_market_penalty": off_book_market_penalty, "incremental_pnl": incremental_pnl}
+		info = {
+			"pnl": current_pnl,
+			"inventory": self.inventory,
+			"spread_penalty": self.spread_penalty,
+			"inventory_penalty": inventory_penalty,
+			"off_book_market_penalty": off_book_market_penalty,
+			"incremental_pnl": incremental_pnl
+		}
 		return obs, reward, done, info
 
 	def _simulate_fills(self, agent_bid, agent_ask, row):
@@ -343,6 +370,7 @@ class StockMarketMakingEnv(gym.Env):
 		current_pnl = self.cash + self.inventory * row["Close"]
 		print(f"Step: {self.current_step}, Index: {self.current_index}, "
 			  f"Inventory: {self.inventory:.2f}, PnL: {current_pnl:.2f}")
+
 
 
 # -----------------------------------------------------------------------------
@@ -537,6 +565,7 @@ class Visualizer:
 		"""
 		plt.figure(figsize=(12, 6))
 		plt.plot(ppo_pnl, label='PPO Agent', linestyle='-', linewidth=2)
+		print(ppo_pnl)
 		for label in labels:
 			plt.plot(benchmark_pnls[label], label=label, linestyle='--', linewidth=2)
 		plt.xlabel("Time Steps")
