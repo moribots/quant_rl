@@ -257,7 +257,7 @@ class StockMarketMakingEnv(gym.Env):
 		# Reward is based on the incremental PnL minus an inventory penalty and the spread penalty.
 		incremental_pnl = current_pnl - self.prev_pnl
 		inventory_penalty = self.inventory_penalty_coeff * (self.inventory ** 2)
-		raw_reward = np.clip(incremental_pnl - inventory_penalty + self.spread_penalty, -10, 10)
+		raw_reward = incremental_pnl - inventory_penalty + self.spread_penalty
 		reward = np.tanh(raw_reward / 10.0) * 10.0  # Normalize reward using tanh.
 
 		# Update the previous PnL for the next step.
