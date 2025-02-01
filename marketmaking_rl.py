@@ -846,7 +846,7 @@ if __name__ == "__main__":
 		"DATA_INTERVAL": "1m",            # Time interval between data points.
 		"MAX_OFFSET": 1.0,                # Maximum quote offset.
 		"LOT_SIZE": 100,                  # Trade lot size.
-		"INVENTORY_PENALTY": 1e-7,         # Penalty coefficient for inventory.
+		"INVENTORY_PENALTY": 1e-6,         # Penalty coefficient for inventory.
 		"TOTAL_TIMESTEPS": 50000,         # Total training steps for PPO.
 		"EVAL_EPISODES": 1,               # Number of evaluation episodes.
 		"MODEL_SAVE_FREQ": 10000,         # Frequency (in timesteps) to save the model.
