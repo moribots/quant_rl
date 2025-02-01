@@ -238,9 +238,9 @@ class StockMarketMakingEnv(gym.Env):
 
 		# Compute a penalty based on how tight the spread is relative to volatility.
 		volatility_factor = 2.0
-		spread_penalty_factor = 10.0
-		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * volatility_factor)
-		self.spread_penalty = max(self.spread_penalty, 0)
+		spread_penalty_factor = 100.0
+		self.spread_penalty = abs(ask_offset - bid_offset) - (volatility * volatility_factor) 
+		self.spread_penalty = max(self.spread_penalty, 0) * spread_penalty_factor
 
 		off_book_market_penalty_factor = 10.0
 		market_ask = row["High"]
@@ -645,7 +645,7 @@ class MarketMakerRunner:
 			"verbose": 1,
 
 			# Learning rate which determines gradient step size.
-			"learning_rate": 0.002,
+			"learning_rate": 0.001,
 
 			# Clip range for PPO's policy update. This clips the ratio between the new
 			# and old policy probabilities to lie within [1 - clip_range, 1 + clip_range].
@@ -670,7 +670,7 @@ class MarketMakerRunner:
 
 			# Entropy coefficient. This term in the loss function encourages exploration by
 			# adding randomness to the policy.
-			"ent_coef": 0.2,
+			"ent_coef": 0.1,
 
 			# Value function coefficient. This scales the loss term associated with the critic (value network).
 			"vf_coef": 0.25,
