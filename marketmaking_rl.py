@@ -4,7 +4,6 @@ Market-Making RL Agent with PPO
 
 This code demonstrates how to build, train, and evaluate a reinforcement learning (RL) agent 
 for a simulated market-making task using a custom OpenAI Gym environment and the PPO algorithm.
-Each component is encapsulated in its own class with detailed comments to explain each step.
 """
 
 # -----------------------------------------------------------------------------
