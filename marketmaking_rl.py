@@ -143,7 +143,11 @@ class StockMarketMakingEnv(gym.Env):
 		start_index: int = 0,
 		end_index: int = None,
 		volatility_window: int = 50,
-		rollover: bool = True  # New parameter: if True, maintain state across episodes
+		# For stateless training, we disable rollover and randomize initial state:
+		rollover: bool = False,
+		random_init: bool = True,
+		inventory_range: tuple = (-50, 50),
+		cash_range: tuple = (-5000, 5000)
 	):
 		"""
 		Initialize the environment with market data and trading parameters.
@@ -154,8 +158,11 @@ class StockMarketMakingEnv(gym.Env):
 		- inventory_penalty_coeff: Coefficient to penalize large inventory positions.
 		- start_index and end_index: Define the segment of the data to use.
 		- volatility_window: Window size for calculating price volatility.
-		- rollover: If True, the agent's state (inventory, cash, PnL) is maintained
-					between episodes, avoiding forced liquidation at the end of each episode.
+		- rollover: If True, the agent's state is preserved between episodes.
+					(For stateless training, set to False.)
+		- random_init: If True, randomize the starting inventory and cash on every reset.
+		- inventory_range: Tuple (min, max) for random initial inventory.
+		- cash_range: Tuple (min, max) for random initial cash.
 		"""
 		super(StockMarketMakingEnv, self).__init__()
 		self.df = df.reset_index(drop=True)
@@ -175,17 +182,20 @@ class StockMarketMakingEnv(gym.Env):
 		self.lot_size = lot_size
 		self.inventory_penalty_coeff = inventory_penalty_coeff
 
+		# For stateless training, we want to randomize the initial state every episode.
+		# Set rollover to False (i.e. do not preserve state) and enable random initialization.
+		self.rollover = rollover
+		self.random_init = random_init
+		self.inventory_range = inventory_range
+		self.cash_range = cash_range
+
 		# Initialize the environment's trading state.
-		# These variables will be maintained across episodes if rollover is True.
 		self.current_step = 0
 		self.current_index = self.start_index
 		self.inventory = 0.0  # How many assets the agent holds.
 		self.cash = 0.0       # Cash available from trading.
 		self.prev_pnl = 0.0   # Previous profit and loss.
 		self.spread_penalty = 0.0  # Penalty for setting narrow spreads.
-
-		# Store the rollover mode flag.
-		self.rollover = rollover
 
 		# Define the action space.
 		# The agent chooses two numbers: one for bid offset and one for ask offset.
@@ -208,26 +218,29 @@ class StockMarketMakingEnv(gym.Env):
 		"""
 		Reset the environment at the beginning of an episode.
 		
-		In non-rollover mode, this method resets the agent's state (inventory, cash, prev_pnl)
-		to zero and resets the current_index to the start_index.
-		
-		In rollover mode, the agent's state is preserved. However, to avoid out-of-bounds
-		errors and to simulate continuity, we reset the time counter and wrap the market 
-		data index back to the start of the defined segment.
+		For stateless training, we randomize the agent's initial state (inventory and cash)
+		on every reset so that the agent learns a robust policy over a range of starting conditions.
 		"""
 		self.current_step = 0
-		if not self.rollover:
-			# Standard reset: clear the agent's state.
-			self.current_index = self.start_index
+		self.current_index = self.start_index
+
+		if self.random_init:
+			# Obtain an initial market price from the first row of the data.
+			initial_row = self.df.iloc[self.start_index]
+			mid_price = 0.5 * (initial_row["High"] + initial_row["Low"])
+			# Randomize inventory and cash within the specified ranges.
+			self.inventory = np.random.uniform(self.inventory_range[0], self.inventory_range[1])
+			self.cash = np.random.uniform(self.cash_range[0], self.cash_range[1])
+			# Set previous PnL based on the randomized state.
+			self.prev_pnl = self.cash + self.inventory * mid_price
+			self.spread_penalty = 0.0
+		else:
+			# If not randomizing, simply reset state to zero.
 			self.inventory = 0.0
 			self.cash = 0.0
 			self.prev_pnl = 0.0
 			self.spread_penalty = 0.0
-		else:
-			# Rollover mode: preserve inventory, cash, and prev_pnl.
-			# To ensure we can index the DataFrame, wrap around the market data index.
-			self.current_index = self.start_index  # Reset market data to beginning.
-			self.spread_penalty = 0.0  # Clear episode-specific penalties.
+
 		return self._get_observation()
 
 	def get_volatility(self):
@@ -375,7 +388,6 @@ class StockMarketMakingEnv(gym.Env):
 		current_pnl = self.cash + self.inventory * row["Close"]
 		print(f"Step: {self.current_step}, Index: {self.current_index}, "
 			  f"Inventory: {self.inventory:.2f}, PnL: {current_pnl:.2f}")
-
 
 
 # -----------------------------------------------------------------------------
@@ -665,7 +677,12 @@ class MarketMakerRunner:
 			lot_size=self.config["LOT_SIZE"],
 			inventory_penalty_coeff=self.config["INVENTORY_PENALTY"],
 			start_index=0,
-			end_index=len(df_data) - 1
+			end_index=len(df_data) - 1,
+			# For stateless training, we use random initialization and do not rollover.
+			rollover=False,
+			random_init=True,
+			inventory_range=(-50, 50),
+			cash_range=(-5000, 5000)
 		)
 		# Wrap the environment to support multiple instances and normalization.
 		vec_env = DummyVecEnv([lambda: env])
@@ -729,7 +746,6 @@ class MarketMakerRunner:
 			)
 		}
 
-
 		# Prepare callbacks for saving the model and logging training metrics.
 		model_save_path = self.config["MODEL_SAVE_PATH"]
 		os.makedirs(model_save_path, exist_ok=True)
@@ -766,7 +782,11 @@ class MarketMakerRunner:
 			lot_size=self.config["LOT_SIZE"],
 			inventory_penalty_coeff=self.config["INVENTORY_PENALTY"],
 			start_index=0,
-			end_index=len(eval_df) - 1
+			end_index=len(eval_df) - 1,
+			rollover=False,            # For evaluation, use stateless (random init) as well.
+			random_init=True,
+			inventory_range=(-50, 50),
+			cash_range=(-5000, 5000)
 		)])
 		eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
@@ -846,7 +866,7 @@ if __name__ == "__main__":
 		"DATA_INTERVAL": "1m",            # Time interval between data points.
 		"MAX_OFFSET": 1.0,                # Maximum quote offset.
 		"LOT_SIZE": 100,                  # Trade lot size.
-		"INVENTORY_PENALTY": 1e-6,         # Penalty coefficient for inventory.
+		"INVENTORY_PENALTY": 1e-7,         # Penalty coefficient for inventory.
 		"TOTAL_TIMESTEPS": 50000,         # Total training steps for PPO.
 		"EVAL_EPISODES": 1,               # Number of evaluation episodes.
 		"MODEL_SAVE_FREQ": 10000,         # Frequency (in timesteps) to save the model.
